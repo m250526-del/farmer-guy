@@ -1,0 +1,72 @@
+# ============================================================
+# KisaanDost / FarmAI — .gitignore
+# ============================================================
+
+# --- Secrets & environment ---
+.env
+.env.*
+!.env.example
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+eggs/
+.eggs/
+.venv/
+venv/
+env/
+ENV/
+.Python
+*.spec
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+*.log
+
+# --- Node / JavaScript ---
+node_modules/
+.expo/
+dist/
+.next/
+.nuxt/
+.output/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# --- Generated audio (backend TTS output) ---
+backend/static/audio/*.wav
+
+# --- Data & Vector store (RAG / ChromaDB / SQLite) ---
+chroma_data/
+*.chroma/
+backend/chroma_db/
+backend/data/
+*.sqlite3
+*.db
+
+# --- OS junk ---
+.DS_Store
+Thumbs.db
+desktop.ini
+ehthumbs.db
+
+# --- Editor / IDE ---
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+*.sublime-project
+*.sublime-workspace
+
