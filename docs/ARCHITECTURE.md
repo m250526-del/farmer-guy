@@ -84,7 +84,7 @@ The key manager inspects exact SDK exception attributes (`exc.code`, `exc.status
 |---|---|---|
 | `quota_or_rate_limit` | HTTP `429` or status `RESOURCE_EXHAUSTED` | Key placed on cooldown for `KEY_COOLDOWN_SECONDS` (default: 60s); rotates immediately to next key. |
 | `invalid_api_key` | HTTP `401`, `403`, or `400` mentioning invalid key / unauthenticated | Key marked permanently `bad = True` for process lifetime; rotates immediately to next key. |
-| `transient` | HTTP `500`, `502`, `503`, `504`, timeouts, connection drops | Retries the **same key once** after a 0.5s pause; if retry fails, rotates to next key. |
+| `transient` | HTTP `500`, `502`, `503`, `504`, timeouts, connection drops | Retries the **same key once** after a 0.5s pause; if retry fails, re-classifies the second exception (applying cooldown or marking bad if applicable) before rotating to next key. |
 | `model_not_found` | HTTP `404` or status `NOT_FOUND` | **Not a key error.** Re-raised immediately to let caller attempt model fallback. |
 | `invalid_request` | HTTP `400` malformed request/arguments | **Not a key error.** Re-raised immediately without rotating keys. |
 | `unknown` | Unrecognized error | Re-raised immediately without rotating keys. |
@@ -104,7 +104,7 @@ All interactions with the official Google Gen AI SDK (`google-genai`) are centra
 ### Capabilities:
 - **Async Execution**: Employs `client.aio.models.generate_content` so the server never blocks the Python async event loop.
 - **Model Fallback**: Iterates through the configured model list in priority order. If a model fails with `model_not_found`, it moves to the next model in the list.
-- **Timeouts**: Wraps calls in `asyncio.wait_for` using `GEMINI_REQUEST_TIMEOUT_SECONDS` (default: 30s), extending by +15s if an image is attached.
+- **Timeouts**: Enforces timeouts at the SDK level via `HttpOptions(timeout=timeout_ms)` in milliseconds (converting `GEMINI_REQUEST_TIMEOUT_SECONDS * 1000`, extending by +15,000ms if an image is attached).
 - **Image Support**: Prepares multimodal inputs (`ImageInput` with bytes and MIME type) for crop pest/disease image diagnosis.
 - **Empty Response Guard**: Checks response text and candidate safety finish reasons, raising `EmptyGeminiResponseError` if the model produced no usable text.
 - **Return Type**: Yields a structured `GeminiTextResult` containing `text`, `model_used`, `key_slot`, and `latency_ms`.
@@ -116,8 +116,8 @@ All interactions with the official Google Gen AI SDK (`google-genai`) are centra
 | Endpoint | Environment | Description |
 |---|---|---|
 | `GET /gemini-status` | All (`dev` & `prod`) | Returns counts of configured keys per domain and effective model lists. Never returns secrets or partial keys. |
-| `GET /gemini-test?domain=CHAT` | Development only | Sends `"Reply with exactly: OK"` through the chosen domain's pool. Verifies live key validity. Returns 404 in production. |
-| `GET /gemini-models-check?domain=CHAT` | Development only | Tests each model in the list individually without fallback to verify which models are available. Returns 404 in production. |
+| `GET /gemini-test?domain=CHAT` | Development only | Sends `"Reply with exactly: OK"` through the chosen domain's pool. Verifies live key validity. On failure returns `attempts` detailing `exception_type` and scrubbed `message`. Returns 404 in production. |
+| `GET /gemini-models-check?domain=CHAT` | Development only | Tests each model in the list individually without fallback. Returns per-model health with `exception_type` and scrubbed `message`. Returns 404 in production. |
 
 ---
 

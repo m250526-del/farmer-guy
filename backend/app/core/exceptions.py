@@ -18,9 +18,11 @@ from typing import Any
 
 @dataclass
 class KeyAttempt:
-    """Record of a single key attempt — slot number and error class only."""
+    """Record of a single key attempt — slot number, error class, exception type, and scrubbed message."""
     slot: int
     error_class: str
+    exception_type: str = ""
+    message: str = ""
 
 
 class NoKeysConfiguredError(RuntimeError):

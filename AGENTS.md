@@ -245,4 +245,5 @@ This section is updated after each stage as new code is added.
 | Stage 2 | 2026-11-19 | Key manager (CHAT/STT/TTS pools, round-robin rotation, per-key cooldown, permanent bad-key marking), Gemini client (model fallback, timeout, image support stub, empty-response guard), three /gemini-status/test/models-check endpoints, google-genai==3.6.1 installed. |
 | Stage 2 Follow-up | 2026-11-19 | Model lists changed to gemini-3.5-flash-lite (text, STT) and gemini-3.8-flash-lite-tts (TTS). |
 | Documentation | 2026-11-19 | Added README.md, docs/ARCHITECTURE.md, and new LLM quick context block in AGENTS.md. |
+| Stage 2 Bug-Fix | 2026-11-20 | Expose real exceptions in /gemini-test & /gemini-models-check (exception_type, scrubbed message), SDK millisecond timeout in HttpOptions, robust classify_exception, retry bookkeeping, and dynamic .env resolution in config.py. |
 

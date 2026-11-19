@@ -10,6 +10,7 @@ Endpoints:
 
 SECURITY:
   - No key values, no partial key values, no key hashes are ever returned.
+  - All exception texts are scrubbed before returning.
   - /gemini-test and /gemini-models-check return 404 in production.
 """
 
@@ -27,7 +28,13 @@ from app.core.exceptions import (
     GeminiUnavailableError,
     NoKeysConfiguredError,
 )
-from app.core.key_manager import Domain, _get_pool, classify_exception
+from app.core.key_manager import (
+    Domain,
+    _get_all_configured_keys,
+    _get_pool,
+    classify_exception,
+    scrub_secrets,
+)
 from app.core.models import get_text_models, get_tts_models, get_stt_models
 from app.services.gemini_client import generate_text
 
@@ -48,9 +55,6 @@ def _pool_info(domain: Domain) -> dict:
     """Return safe info about a pool (count + fallback flag only)."""
     try:
         pool = _get_pool(domain)
-        slots = pool._slots
-        # Count all slots initially loaded; mark fallback if size==1 and
-        # domain-specific keys are absent but GEMINI_API_KEY is set.
         settings = get_settings()
         domain_keys = [
             getattr(settings, f"GEMINI_{domain}_KEY_{i}", None)
@@ -103,6 +107,8 @@ async def gemini_test(
     if domain not in _VALID_DOMAINS:
         raise HTTPException(status_code=400, detail=f"domain must be one of {_VALID_DOMAINS}")
 
+    all_keys = _get_all_configured_keys()
+
     try:
         result = await generate_text(
             prompt=_TEST_PROMPT,
@@ -118,36 +124,63 @@ async def gemini_test(
         }
 
     except NoKeysConfiguredError as exc:
+        safe_msg = scrub_secrets(str(exc), all_keys)[:300]
         raise HTTPException(
             status_code=400,
-            detail={"status": "error", "error_type": "no_keys_configured", "detail": str(exc), "attempts": []},
+            detail={"status": "error", "error_type": "no_keys_configured", "detail": safe_msg, "attempts": []},
         )
 
     except AllKeysExhaustedError as exc:
-        attempts = [{"slot": a.slot, "error_class": a.error_class} for a in exc.attempts]
+        attempts = [
+            {
+                "slot": a.slot,
+                "error_class": a.error_class,
+                "exception_type": a.exception_type,
+                "message": a.message,
+            }
+            for a in exc.attempts
+        ]
+        safe_msg = scrub_secrets(str(exc), all_keys)[:300]
         raise HTTPException(
             status_code=503,
-            detail={"status": "error", "error_type": "all_keys_exhausted", "detail": str(exc), "attempts": attempts},
+            detail={"status": "error", "error_type": "all_keys_exhausted", "detail": safe_msg, "attempts": attempts},
         )
 
     except GeminiUnavailableError as exc:
+        safe_msg = scrub_secrets(str(exc), all_keys)[:300]
         raise HTTPException(
             status_code=503,
-            detail={"status": "error", "error_type": "gemini_unavailable", "detail": str(exc), "attempts": exc.model_attempts},
+            detail={
+                "status": "error",
+                "error_type": "gemini_unavailable",
+                "detail": safe_msg,
+                "attempts": exc.model_attempts,
+            },
         )
 
     except EmptyGeminiResponseError as exc:
+        safe_msg = scrub_secrets(str(exc), all_keys)[:300]
         raise HTTPException(
             status_code=503,
-            detail={"status": "error", "error_type": "empty_response", "detail": str(exc), "attempts": []},
+            detail={"status": "error", "error_type": "empty_response", "detail": safe_msg, "attempts": []},
         )
 
     except Exception as exc:
         err_class = classify_exception(exc)
+        safe_msg = scrub_secrets(str(exc), all_keys)[:300]
         logger.exception("[GeminiStatus] /gemini-test unexpected error (class=%s)", err_class)
         raise HTTPException(
             status_code=503,
-            detail={"status": "error", "error_type": err_class, "detail": "Unexpected error; check server logs.", "attempts": []},
+            detail={
+                "status": "error",
+                "error_type": err_class,
+                "detail": safe_msg,
+                "attempts": [{
+                    "error_class": err_class,
+                    "exception_type": type(exc).__name__,
+                    "message": safe_msg,
+                }],
+            },
         )
 
 
@@ -166,6 +199,7 @@ async def gemini_models_check(
     if domain not in _VALID_DOMAINS:
         raise HTTPException(status_code=400, detail=f"domain must be one of {_VALID_DOMAINS}")
 
+    all_keys = _get_all_configured_keys()
     model_list = get_text_models()
     results = []
 
@@ -176,25 +210,51 @@ async def gemini_models_check(
                 domain=domain,  # type: ignore[arg-type]
                 models=[model],  # one model only — no fallback
             )
-            results.append({"model": model, "working": True, "error_type": None})
+            results.append({
+                "model": model,
+                "working": True,
+                "error_type": None,
+                "exception_type": None,
+                "message": None,
+            })
 
         except (NoKeysConfiguredError, AllKeysExhaustedError) as exc:
-            # Key problem — no point continuing with other models
+            # Key problem — fail fast
+            safe_msg = scrub_secrets(str(exc), all_keys)[:300]
             raise HTTPException(
                 status_code=400 if isinstance(exc, NoKeysConfiguredError) else 503,
-                detail=str(exc),
+                detail=safe_msg,
             )
 
         except GeminiUnavailableError as exc:
-            error_type = exc.model_attempts[0]["error_class"] if exc.model_attempts else "unknown"
-            results.append({"model": model, "working": False, "error_type": error_type})
+            attempt = exc.model_attempts[0] if exc.model_attempts else {}
+            results.append({
+                "model": model,
+                "working": False,
+                "error_type": attempt.get("error_class", "unknown"),
+                "exception_type": attempt.get("exception_type", type(exc).__name__),
+                "message": attempt.get("message", scrub_secrets(str(exc), all_keys)[:300]),
+            })
 
-        except EmptyGeminiResponseError:
-            results.append({"model": model, "working": False, "error_type": "empty_response"})
+        except EmptyGeminiResponseError as exc:
+            safe_msg = scrub_secrets(str(exc), all_keys)[:300]
+            results.append({
+                "model": model,
+                "working": False,
+                "error_type": "empty_response",
+                "exception_type": type(exc).__name__,
+                "message": safe_msg,
+            })
 
         except Exception as exc:
             err_class = classify_exception(exc)
-            results.append({"model": model, "working": False, "error_type": err_class})
+            safe_msg = scrub_secrets(str(exc), all_keys)[:300]
+            results.append({
+                "model": model,
+                "working": False,
+                "error_type": err_class,
+                "exception_type": type(exc).__name__,
+                "message": safe_msg,
+            })
 
     return {"domain": domain, "models": results}
-

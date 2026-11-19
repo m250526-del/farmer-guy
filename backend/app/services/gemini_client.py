@@ -105,18 +105,22 @@ async def generate_text(
     settings = get_settings()
     model_list = models or get_text_models()
 
+    # Compute timeout in milliseconds for google-genai HttpOptions
     base_timeout = settings.GEMINI_REQUEST_TIMEOUT_SECONDS
     timeout_secs = base_timeout + 15 if image else base_timeout
+    timeout_ms = int(timeout_secs * 1000)
 
     model_attempts: list[dict] = []
-    t_overall_start = time.monotonic()
 
     for model in model_list:
         t_model_start = time.monotonic()
 
-        async def _call(api_key: str, _model: str = model) -> str:
+        async def _call(api_key: str, _model: str = model) -> object:
             """Inner coroutine that the key-manager will call with a key."""
-            client = genai.Client(api_key=api_key)
+            client = genai.Client(
+                api_key=api_key,
+                http_options=genai_types.HttpOptions(timeout=timeout_ms),
+            )
 
             # Build config
             config_kwargs: dict = {}
@@ -146,14 +150,11 @@ async def generate_text(
             else:
                 contents = [prompt]
 
-            # Async call with timeout
-            response = await asyncio.wait_for(
-                client.aio.models.generate_content(
-                    model=_model,
-                    contents=contents,
-                    config=generation_config,
-                ),
-                timeout=timeout_secs,
+            # Async call with SDK HttpOptions timeout
+            response = await client.aio.models.generate_content(
+                model=_model,
+                contents=contents,
+                config=generation_config,
             )
             return response
 
@@ -182,7 +183,9 @@ async def generate_text(
             raise
 
         except APIError as exc:
-            from app.core.key_manager import classify_exception
+            from app.core.key_manager import classify_exception, scrub_secrets, _get_pool
+            pool = _get_pool(domain)
+            safe_msg = scrub_secrets(str(exc), pool.all_keys())
             err_class = classify_exception(exc)
             if err_class == "model_not_found":
                 latency_ms = (time.monotonic() - t_model_start) * 1000
@@ -191,7 +194,12 @@ async def generate_text(
                     "Trying next model.",
                     model, latency_ms,
                 )
-                model_attempts.append({"model": model, "error_class": err_class})
+                model_attempts.append({
+                    "model": model,
+                    "error_class": err_class,
+                    "exception_type": type(exc).__name__,
+                    "message": safe_msg[:300],
+                })
                 continue
             # invalid_request or unknown → propagate
             raise
@@ -200,8 +208,7 @@ async def generate_text(
             raise
 
         except Exception as exc:
-            from app.core.key_manager import classify_exception, scrub_secrets
-            from app.core.key_manager import _get_pool
+            from app.core.key_manager import classify_exception, scrub_secrets, _get_pool
             pool = _get_pool(domain)
             safe_msg = scrub_secrets(str(exc), pool.all_keys())
             err_class = classify_exception(exc)
@@ -209,7 +216,12 @@ async def generate_text(
                 "[GeminiClient] model=%s unexpected error class=%s: %s",
                 model, err_class, safe_msg[:200],
             )
-            model_attempts.append({"model": model, "error_class": err_class})
+            model_attempts.append({
+                "model": model,
+                "error_class": err_class,
+                "exception_type": type(exc).__name__,
+                "message": safe_msg[:300],
+            })
             continue
 
     # All models exhausted without success
@@ -258,4 +270,3 @@ def _extract_text(response: object, model: str) -> str:
         raise EmptyGeminiResponseError(model=model, reason=reason)
 
     return text.strip()
-

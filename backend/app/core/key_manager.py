@@ -31,6 +31,40 @@ from app.core.exceptions import (
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
+# Optional HTTP exceptions (httpx / httpx2)
+# ---------------------------------------------------------------------------
+
+_TRANSIENT_EXC_LIST: list[type] = [
+    asyncio.TimeoutError,
+    TimeoutError,
+    ConnectionError,
+    OSError,
+]
+
+try:
+    import httpx
+    _TRANSIENT_EXC_LIST.extend([
+        httpx.TimeoutException,
+        httpx.ConnectError,
+        httpx.NetworkError,
+    ])
+except ImportError:
+    pass
+
+try:
+    import httpx2
+    _TRANSIENT_EXC_LIST.extend([
+        httpx2.TimeoutException,
+        httpx2.ConnectError,
+        httpx2.NetworkError,
+    ])
+except ImportError:
+    pass
+
+_TRANSIENT_EXCEPTIONS = tuple(_TRANSIENT_EXC_LIST)
+
+
+# ---------------------------------------------------------------------------
 # Types
 # ---------------------------------------------------------------------------
 
@@ -76,6 +110,32 @@ class KeyedResult:
 # ---------------------------------------------------------------------------
 
 
+def _get_all_configured_keys() -> list[str]:
+    """Collect all configured key strings for scrubbing."""
+    keys = []
+    try:
+        global _pools
+        for pool in _pools.values():
+            keys.extend(pool.all_keys())
+    except Exception:
+        pass
+    if not keys:
+        try:
+            settings = get_settings()
+            for attr in (
+                "GEMINI_API_KEY",
+                "GEMINI_CHAT_KEY_1", "GEMINI_CHAT_KEY_2", "GEMINI_CHAT_KEY_3",
+                "GEMINI_STT_KEY_1", "GEMINI_STT_KEY_2", "GEMINI_STT_KEY_3",
+                "GEMINI_TTS_KEY_1", "GEMINI_TTS_KEY_2", "GEMINI_TTS_KEY_3",
+            ):
+                val = getattr(settings, attr, None)
+                if val and isinstance(val, str) and val.strip():
+                    keys.append(val.strip())
+        except Exception:
+            pass
+    return list(set(keys))
+
+
 def scrub_secrets(text: str, keys: list[str]) -> str:
     """
     Replace every occurrence of a real key value in `text` with '[REDACTED]'.
@@ -98,59 +158,72 @@ def classify_exception(exc: BaseException) -> ExceptionClass:
     Classify a caught exception into one of six categories so the rotation
     logic knows how to react.
 
-    Classification is based on the SDK's actual exception attributes:
-      - APIError.code  : int HTTP status code
-      - APIError.status: str canonical status (e.g. "RESOURCE_EXHAUSTED")
-      - APIError.message: str human-readable detail
-
-    Network / transport errors (not APIError) are always "transient".
+    Order of inspection:
+      1. asyncio.CancelledError -> must always be re-raised immediately.
+      2. google.genai.errors.APIError subclasses (ClientError, ServerError).
+      3. asyncio.TimeoutError, TimeoutError, httpx/httpx2 connection/timeout, ConnectionError, OSError.
+      4. Anything else -> unknown (logged at ERROR with scrubbed traceback and attributes).
     """
-    if isinstance(exc, APIError):
-        code: int = exc.code or 0
-        status: str = (exc.status or "").upper()
-        message: str = (exc.message or "").lower()
+    if isinstance(exc, asyncio.CancelledError):
+        raise exc
 
-        # --- 429 or RESOURCE_EXHAUSTED → rate limit / quota ---
+    if isinstance(exc, APIError):
+        code: int = getattr(exc, "code", None) or 0
+        status: str = (getattr(exc, "status", None) or "").upper()
+        raw_msg = getattr(exc, "message", None) or str(exc) or ""
+        message: str = raw_msg.lower()
+
+        # 429 quota_or_rate_limit
         if code == 429 or "RESOURCE_EXHAUSTED" in status:
             return "quota_or_rate_limit"
 
-        # --- 401 / 403, or 400 that explicitly mentions API key validity ---
+        # 401/403 invalid_api_key
         if code in (401, 403):
             return "invalid_api_key"
-        if code == 400 and (
-            "api key" in message
-            or "api_key" in message
-            or "invalid key" in message
-            or "UNAUTHENTICATED" in status
-            or "PERMISSION_DENIED" in status
-        ):
-            return "invalid_api_key"
 
-        # --- 404 or model-not-found / not-supported messages ---
+        # 400 with an "API key not valid" style message invalid_api_key, other 400 invalid_request
+        if code == 400:
+            if (
+                "api key not valid" in message
+                or "api key is not valid" in message
+                or "api key invalid" in message
+                or "invalid api key" in message
+                or "api_key not valid" in message
+                or "api_key invalid" in message
+                or "unauthenticated" in status.lower()
+                or "permission_denied" in status.lower()
+            ):
+                return "invalid_api_key"
+            if "model" in message and ("not found" in message or "not support" in message):
+                return "model_not_found"
+            return "invalid_request"
+
+        # 404 model_not_found
         if code == 404 or "NOT_FOUND" in status:
             return "model_not_found"
-        if code == 400 and (
-            "model" in message and ("not found" in message or "not support" in message)
-        ):
-            return "model_not_found"
 
-        # --- 5xx server errors → transient ---
+        # 500/502/503/504 transient
         if code in (500, 502, 503, 504):
             return "transient"
 
-        # --- Other 400-range errors → invalid request (not a key problem) ---
+        # Other 4xx range -> invalid_request
         if 400 <= code < 500:
             return "invalid_request"
 
-        return "unknown"
-
-    # --- Network / transport failures → transient ---
-    exc_type = type(exc).__name__
-    if any(
-        name in exc_type
-        for name in ("Timeout", "Connect", "Network", "Transport", "OSError")
-    ) or isinstance(exc, (TimeoutError, asyncio.TimeoutError, ConnectionError, OSError)):
+    # Connection and timeout failures -> transient
+    if isinstance(exc, _TRANSIENT_EXCEPTIONS):
         return "transient"
+
+    # Anything else -> unknown (log at ERROR level with scrubbed traceback and attributes)
+    full_class = f"{type(exc).__module__}.{type(exc).__qualname__}"
+    attrs = []
+    for attr in ("code", "status", "status_code", "message", "details"):
+        if hasattr(exc, attr):
+            attrs.append(f"{attr}={getattr(exc, attr)}")
+    attr_str = f" | {', '.join(attrs)}" if attrs else ""
+    raw_log = f"[KeyManager] Unknown exception [{full_class}]: {exc}{attr_str}"
+    safe_log = scrub_secrets(raw_log, _get_all_configured_keys())
+    logger.error(safe_log, exc_info=exc)
 
     return "unknown"
 
@@ -360,9 +433,18 @@ async def run_with_key_rotation(
             return KeyedResult(result=result, key_slot=slot.slot)
 
         except BaseException as exc:
+            if isinstance(exc, asyncio.CancelledError):
+                raise
             error_class = classify_exception(exc)
             safe_msg = scrub_secrets(str(exc), all_keys_for_scrub)
-            attempts.append(KeyAttempt(slot=slot.slot, error_class=error_class))
+            attempts.append(
+                KeyAttempt(
+                    slot=slot.slot,
+                    error_class=error_class,
+                    exception_type=type(exc).__name__,
+                    message=safe_msg[:300],
+                )
+            )
 
             if error_class == "quota_or_rate_limit":
                 logger.warning(
@@ -397,15 +479,32 @@ async def run_with_key_rotation(
                     )
                     return KeyedResult(result=result, key_slot=slot.slot)
                 except BaseException as retry_exc:
+                    if isinstance(retry_exc, asyncio.CancelledError):
+                        raise
                     retry_class = classify_exception(retry_exc)
                     retry_msg = scrub_secrets(str(retry_exc), all_keys_for_scrub)
                     logger.warning(
-                        "[KeyManager] Domain=%s slot=%d → retry also failed (%s). "
-                        "Moving to next key.",
-                        domain, slot.slot, retry_msg[:120],
+                        "[KeyManager] Domain=%s slot=%d → retry failed (%s: %s).",
+                        domain, slot.slot, retry_class, retry_msg[:120],
                     )
-                    attempts[-1] = KeyAttempt(slot=slot.slot, error_class=retry_class)
-                    continue
+                    attempts[-1] = KeyAttempt(
+                        slot=slot.slot,
+                        error_class=retry_class,
+                        exception_type=type(retry_exc).__name__,
+                        message=retry_msg[:300],
+                    )
+
+                    # Apply matching action for the second exception
+                    if retry_class == "quota_or_rate_limit":
+                        await pool.mark_cooldown(slot, cooldown_secs)
+                        continue
+                    elif retry_class == "invalid_api_key":
+                        await pool.mark_bad(slot)
+                        continue
+                    elif retry_class in ("model_not_found", "invalid_request", "unknown"):
+                        raise
+                    else:  # still transient
+                        continue
 
             elif error_class in ("model_not_found", "invalid_request"):
                 # Not a key problem — propagate immediately.
@@ -415,4 +514,3 @@ async def run_with_key_rotation(
                 raise
 
     raise AllKeysExhaustedError(domain=domain, attempts=attempts)
-
