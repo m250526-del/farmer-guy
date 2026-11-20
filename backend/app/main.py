@@ -7,6 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.health import router as health_router
 from app.api.gemini_status import router as gemini_status_router
+from app.api.knowledge import router as knowledge_router
 from app.core.config import get_settings
 from app.core.key_manager import init_pools
 
@@ -91,6 +92,7 @@ def create_app() -> FastAPI:
     # Routers
     application.include_router(health_router)
     application.include_router(gemini_status_router)
+    application.include_router(knowledge_router)
 
     @application.get("/", tags=["Root"])
     async def root() -> dict:

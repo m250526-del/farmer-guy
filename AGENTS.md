@@ -8,8 +8,8 @@ This file is the single source of truth for every AI agent and human developer w
 > **Quick Context for New LLM Sessions**:
 > - **Project**: KisaanDost (FarmAI) — AI agricultural advisory assistant for Pakistani farmers (Urdu, Roman Urdu, English, Punjabi, Siraiki).
 > - **Architecture**: React Native (Expo) frontend + FastAPI backend brain + n8n background automation (never in live voice/chat path).
-> - **Current Stage**: **Stage 3 — Knowledge & RAG** is in progress (Stage 1 Foundation and Stage 2 Key Manager & Gemini Core are completed).
-> - **Active Models**: `gemini-3.5-flash-lite` (Text reasoning & STT) and `gemini-3.8-flash-lite-tts` (TTS with voice `Aoede`). Do not alter or add prefixes to these names.
+> - **Current Stage**: **Stage 4 — Tools (Weather, Mandi, Image Validation)** is in progress (Stage 1 Foundation, Stage 2 Key Manager & Gemini Core, and Stage 3 Knowledge & RAG are completed).
+> - **Active Models**: `gemini-3.5-flash-lite` (Text reasoning & STT), `gemini-3.8-flash-lite-tts` (TTS with voice `Aoede`), and `gemini-embedding-001` (RAG embeddings, 768 dimensions). Do not alter or add prefixes to these names.
 > - **What to Read Next**: [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md) for technical flow, key rotation, and API contract invariants.
 > - **Standing Rules**: Never create or read real `.env` files; never commit or log secrets; make additive changes only; route all Gemini calls through `app/services/gemini_client.py` and `app/core/key_manager.py`.
 
@@ -119,10 +119,10 @@ farmer_guy/
 - [x] **Stage 2 — Key Manager & Gemini Core** ✅  
   Rotating API key manager, Gemini client wrapper, model selection logic.
 
-- [ ] **Stage 3 — Knowledge & RAG** ← 🔄 IN PROGRESS  
+- [x] **Stage 3 — Knowledge & RAG** ✅  
   Document ingestion pipeline, vector store (ChromaDB), retrieval tool.
 
-- [ ] **Stage 4 — Tools (Weather, Mandi, Image Validation)**  
+- [ ] **Stage 4 — Tools (Weather, Mandi, Image Validation)** ← 🔄 IN PROGRESS  
   Open-Meteo weather tool, mandi price scraper/API tool, Gemini image validation tool.
 
 - [ ] **Stage 5 — The Agent (Gemini Tool-Calling)**  
@@ -165,6 +165,7 @@ farmer_guy/
 5. **Do not commit or push** unless the user explicitly asks.
 6. **After every stage:** update the checklist above (mark the stage done, mark the next one in-progress) and add an entry to the Progress Log below.
 7. **All Gemini calls must go through `services/gemini_client.py` and `core/key_manager.py`.** Never import or call the `google-genai` SDK directly in any other file.
+8. **Agent prompts may include retrieved knowledge only through `knowledge/context.py` `format_context()`.** Never dump raw chunk texts or uncontrolled context directly into agent prompts.
 
 ---
 
@@ -235,6 +236,19 @@ This section is updated after each stage as new code is added.
 | `backend/app/api/gemini_status.py` | `GET /gemini-test` | Live key test for a domain (dev only; 404 in production) |
 | `backend/app/api/gemini_status.py` | `GET /gemini-models-check` | Tests each text model individually (dev only; 404 in production) |
 
+### Stage 3 — Knowledge & RAG
+
+| File | Symbol | Description |
+|------|--------|-------------|
+| `backend/app/knowledge/chunker.py` | `chunk_markdown()` | Heading-aware, Unicode/Urdu-safe markdown chunking with sentence boundary control |
+| `backend/app/knowledge/store.py` | `upsert_chunks()`, `query()`, `stats()` | ChromaDB persistent store with cosine metric and idempotent hashing |
+| `backend/app/knowledge/ingest.py` | `ingest_all()` | Content-hash checking, batch embedding, and ingestion pipeline |
+| `backend/app/knowledge/retriever.py` | `retrieve()` | In-memory LRU query cache + ChromaDB similarity query |
+| `backend/app/knowledge/context.py` | `format_context()` | Strict character budget and sentence boundary context formatter |
+| `backend/app/services/gemini_client.py` | `embed_texts()` | Batch embedding via `client.aio.models.embed_content` + L2 normalization |
+| `backend/scripts/ingest_knowledge.py` | `main()` | CLI ingestion script for crop manuals |
+| `backend/app/api/knowledge.py` | `GET /knowledge-status`, `GET /knowledge-search` | Diagnostic status and retrieval testing endpoints |
+
 ---
 
 ## 8. Progress Log
@@ -246,4 +260,5 @@ This section is updated after each stage as new code is added.
 | Stage 2 Follow-up | 2026-11-19 | Model lists changed to gemini-3.5-flash-lite (text, STT) and gemini-3.8-flash-lite-tts (TTS). |
 | Documentation | 2026-11-19 | Added README.md, docs/ARCHITECTURE.md, and new LLM quick context block in AGENTS.md. |
 | Stage 2 Bug-Fix | 2026-11-20 | Expose real exceptions in /gemini-test & /gemini-models-check (exception_type, scrubbed message), SDK millisecond timeout in HttpOptions, robust classify_exception, retry bookkeeping, and dynamic .env resolution in config.py. |
+| Stage 3 | 2026-11-20 | Token-efficient local RAG: ChromaDB 1.5.9, heading/sentence chunker (Unicode/Urdu-aware), batch embedding with gemini-embedding-001 (768d, L2-normalized), LRU query cache (256), context formatter with sentence boundaries, CLI ingestion script, and /knowledge-status/search endpoints. |
 

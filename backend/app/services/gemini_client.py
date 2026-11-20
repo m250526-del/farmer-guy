@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import time
 from dataclasses import dataclass
 from typing import Optional
@@ -270,3 +271,150 @@ def _extract_text(response: object, model: str) -> str:
         raise EmptyGeminiResponseError(model=model, reason=reason)
 
     return text.strip()
+
+
+# ---------------------------------------------------------------------------
+# Embeddings (Stage 3)
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class GeminiEmbedResult:
+    """Return value of embed_texts()."""
+    vectors: list[list[float]]
+    model_used: str
+    key_slot: int
+    latency_ms: float
+
+
+def _l2_normalize(vector: list[float]) -> list[float]:
+    """Compute unit L2 norm vector (required when dimensions are truncated)."""
+    norm = math.sqrt(sum(x * x for x in vector))
+    if norm == 0.0:
+        return vector
+    return [x / norm for x in vector]
+
+
+_TASK_TYPE_REJECTED_LOGGED = False
+
+
+async def embed_texts(
+    texts: list[str],
+    *,
+    task_type: str,  # "RETRIEVAL_DOCUMENT" or "RETRIEVAL_QUERY"
+    domain: Domain = "CHAT",
+    model: Optional[str] = None,
+) -> GeminiEmbedResult:
+    """
+    Generate vector embeddings for input texts using Gemini embedding models.
+    Supports batching (max 50 texts per API call), L2 normalization,
+    graceful task_type fallback, and key rotation.
+    """
+    global _TASK_TYPE_REJECTED_LOGGED
+    settings = get_settings()
+    model_to_use = model or settings.GEMINI_EMBEDDING_MODEL
+
+    if not texts:
+        return GeminiEmbedResult(
+            vectors=[],
+            model_used=model_to_use,
+            key_slot=1,
+            latency_ms=0.0,
+        )
+
+    base_timeout = settings.GEMINI_REQUEST_TIMEOUT_SECONDS
+    timeout_ms = int(base_timeout * 1000)
+
+    # Process in batches of at most 50
+    batch_size = 50
+    batches = [texts[i:i + batch_size] for i in range(0, len(texts), batch_size)]
+
+    all_vectors: list[list[float]] = []
+    last_key_slot = 1
+    t_start = time.monotonic()
+
+    for batch in batches:
+        async def _call(api_key: str) -> list[list[float]]:
+            global _TASK_TYPE_REJECTED_LOGGED
+            client = genai.Client(
+                api_key=api_key,
+                http_options=genai_types.HttpOptions(timeout=timeout_ms),
+            )
+
+            # Attempt 1: with task_type if not previously rejected
+            use_task_type = task_type if not _TASK_TYPE_REJECTED_LOGGED else None
+            config_kwargs: dict = {}
+            if settings.EMBEDDING_DIMENSIONS:
+                config_kwargs["output_dimensionality"] = settings.EMBEDDING_DIMENSIONS
+            if use_task_type:
+                config_kwargs["task_type"] = use_task_type
+
+            config = genai_types.EmbedContentConfig(**config_kwargs) if config_kwargs else None
+
+            try:
+                response = await client.aio.models.embed_content(
+                    model=model_to_use,
+                    contents=batch,
+                    config=config,
+                )
+            except APIError as api_err:
+                from app.core.key_manager import classify_exception
+                err_class = classify_exception(api_err)
+                if err_class == "model_not_found":
+                    raise
+
+                msg = str(api_err).lower()
+                # If rejected due to task_type, retry without it
+                if use_task_type and ("task_type" in msg or "task type" in msg or "invalid_argument" in msg):
+                    if not _TASK_TYPE_REJECTED_LOGGED:
+                        logger.warning(
+                            "[GeminiClient] Embedding model '%s' rejected task_type '%s'; retrying without task_type.",
+                            model_to_use, task_type
+                        )
+                        _TASK_TYPE_REJECTED_LOGGED = True
+                    fallback_kwargs = {}
+                    if settings.EMBEDDING_DIMENSIONS:
+                        fallback_kwargs["output_dimensionality"] = settings.EMBEDDING_DIMENSIONS
+                    fallback_config = genai_types.EmbedContentConfig(**fallback_kwargs) if fallback_kwargs else None
+                    response = await client.aio.models.embed_content(
+                        model=model_to_use,
+                        contents=batch,
+                        config=fallback_config,
+                    )
+                else:
+                    raise
+
+            # Extract vectors
+            batch_vectors: list[list[float]] = []
+            raw_embeddings = getattr(response, "embeddings", None)
+            if raw_embeddings:
+                for emb in raw_embeddings:
+                    vals = getattr(emb, "values", None)
+                    if vals is not None:
+                        batch_vectors.append(_l2_normalize(list(vals)))
+
+            if not batch_vectors or len(batch_vectors) != len(batch):
+                raise EmptyGeminiResponseError(
+                    model=model_to_use,
+                    reason=f"Expected {len(batch)} embeddings, received {len(batch_vectors)}",
+                )
+
+            return batch_vectors
+
+        keyed = await run_with_key_rotation(domain=domain, operation=_call)
+        last_key_slot = keyed.key_slot
+        all_vectors.extend(keyed.result)
+
+    latency_ms = (time.monotonic() - t_start) * 1000
+    logger.info(
+        "[GeminiClient] Embedded %d texts via model=%s key_slot=%d latency=%.0fms",
+        len(texts), model_to_use, last_key_slot, latency_ms
+    )
+
+    return GeminiEmbedResult(
+        vectors=all_vectors,
+        model_used=model_to_use,
+        key_slot=last_key_slot,
+        latency_ms=round(latency_ms, 1),
+    )
+

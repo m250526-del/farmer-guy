@@ -8,8 +8,9 @@
 
 - **Stage 1 — Foundation**: ✅ Completed (FastAPI skeleton, Expo frontend blank scaffold, environment configurations, git setup).
 - **Stage 2 — Key Manager & Gemini Core**: ✅ Completed (Rotating Gemini API key pools for CHAT, STT, and TTS with cooldowns, error classification, model fallback, secret scrubbing, diagnostic endpoints).
-- **Stage 3 — Knowledge & RAG**: 🔄 **Next Up** (Document ingestion pipeline, vector store, agronomic knowledge retrieval tool).
-- **Stages 4–9**: ⏳ Upcoming (Tools, Agent tool-calling loop, Voice STT/TTS, App screens, n8n workflows, Hardening).
+- **Stage 3 — Knowledge & RAG**: ✅ Completed (ChromaDB 1.5.9, heading/sentence chunking, gemini-embedding-001 768d embeddings with L2 norm, query LRU caching, context formatter, CLI ingestion script, and diagnostic endpoints).
+- **Stage 4 — Tools (Weather, Mandi, Image Validation)**: 🔄 **Next Up** (Open-Meteo tool, mandi rates scraper/API tool, Gemini image validation tool).
+- **Stages 5–9**: ⏳ Upcoming (Agent tool-calling loop, Voice STT/TTS, App screens, n8n workflows, Hardening).
 
 See [AGENTS.md](./AGENTS.md) for the full 9-stage roadmap and progress log.
 
@@ -34,10 +35,12 @@ See [AGENTS.md](./AGENTS.md) for the full 9-stage roadmap and progress log.
 ```
 farmer_guy/
 ├── backend/                  # FastAPI backend application
-│   ├── app/                  # Main application package (api, core, services, tools)
-│   │   ├── api/              # API endpoints (health, gemini_status)
+│   ├── app/                  # Main application package (api, core, knowledge, services, tools)
+│   │   ├── api/              # API endpoints (health, gemini_status, knowledge)
 │   │   ├── core/             # Configuration, model lists, exceptions, key manager
-│   │   └── services/         # Gemini client wrapper (generate_text)
+│   │   ├── knowledge/        # RAG pipeline (chunker, store, ingest, retriever, context)
+│   │   └── services/         # Gemini client wrapper (generate_text, embed_texts)
+│   ├── scripts/              # CLI scripts (ingest_knowledge.py)
 │   ├── requirements.txt      # Python dependencies pinned to exact versions
 │   └── .env.example          # Backend environment template with documentation
 ├── frontend/                 # React Native / Expo mobile application
@@ -51,7 +54,7 @@ farmer_guy/
 │   └── ARCHITECTURE.md       # Technical architecture, request flow, and decisions
 ├── AGENTS.md                 # Single source of truth for build agents and developers
 ├── README.md                 # Project overview, quickstart, and status
-└── .gitignore                # Git exclusions (secrets, venv, node_modules, audio)
+└── .gitignore                # Git exclusions (secrets, venv, node_modules, audio, chroma)
 ```
 
 ---
@@ -87,16 +90,22 @@ farmer_guy/
    - Configure the necessary environment variables in `.env`:
      - `PROJECT_NAME`, `ENVIRONMENT` (`development` or `production`)
      - `GEMINI_API_KEY` (or domain keys `GEMINI_CHAT_KEY_1..3`, `GEMINI_STT_KEY_1..3`, `GEMINI_TTS_KEY_1..3`)
-     - `GEMINI_MODEL`, `GEMINI_TTS_MODEL` (defaults provided in `.env.example`)
+     - `GEMINI_MODEL`, `GEMINI_TTS_MODEL`, `GEMINI_EMBEDDING_MODEL`
      - `GEMINI_REQUEST_TIMEOUT_SECONDS`, `KEY_COOLDOWN_SECONDS`
      - `OPEN_METEO_BASE_URL`, `N8N_WEBHOOK_BASE_URL`
    *(Never commit the `.env` file — it is ignored by git).*
-5. **Run the backend server**:
+5. **Ingest knowledge documents** (populates local ChromaDB vector store):
+   ```bash
+   python scripts/ingest_knowledge.py
+   ```
+6. **Run the backend server**:
    ```bash
    uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
    ```
-6. **Verify health**:
-   - Visit `http://localhost:8000/health` or `http://localhost:8000/gemini-status`.
+7. **Verify health & status**:
+   - Health check: `http://localhost:8000/health`
+   - Gemini pool status: `http://localhost:8000/gemini-status`
+   - Knowledge base status: `http://localhost:8000/knowledge-status`
 
 ### 2. Frontend Setup
 

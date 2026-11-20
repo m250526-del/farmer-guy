@@ -52,6 +52,26 @@ class Settings(BaseSettings):
     GEMINI_REQUEST_TIMEOUT_SECONDS: int = 30   # Seconds before a Gemini API call times out
     KEY_COOLDOWN_SECONDS: int = 60             # Seconds a rate-limited key is put on cooldown
 
+    # --- RAG & Knowledge (Stage 3) ---
+    GEMINI_EMBEDDING_MODEL: str = "gemini-embedding-001"
+    EMBEDDING_DIMENSIONS: int = 768
+    CHROMA_PATH: str = "data/chroma"
+    RAG_TOP_K: int = 3
+    RAG_CHUNK_MAX_CHARS: int = 900
+    RAG_CHUNK_OVERLAP_CHARS: int = 100
+    RAG_MIN_RELEVANCE: float = 0.0
+    RAG_CONTEXT_MAX_CHARS: int = 3000
+    RAG_QUERY_CACHE_SIZE: int = 256
+
+    @property
+    def resolved_chroma_path(self) -> Path:
+        """Resolve CHROMA_PATH relative to backend/ directory."""
+        path = Path(self.CHROMA_PATH)
+        if path.is_absolute():
+            return path
+        backend_dir = Path(__file__).resolve().parents[2]
+        return backend_dir / path
+
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:

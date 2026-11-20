@@ -107,21 +107,64 @@ All interactions with the official Google Gen AI SDK (`google-genai`) are centra
 - **Timeouts**: Enforces timeouts at the SDK level via `HttpOptions(timeout=timeout_ms)` in milliseconds (converting `GEMINI_REQUEST_TIMEOUT_SECONDS * 1000`, extending by +15,000ms if an image is attached).
 - **Image Support**: Prepares multimodal inputs (`ImageInput` with bytes and MIME type) for crop pest/disease image diagnosis.
 - **Empty Response Guard**: Checks response text and candidate safety finish reasons, raising `EmptyGeminiResponseError` if the model produced no usable text.
-- **Return Type**: Yields a structured `GeminiTextResult` containing `text`, `model_used`, `key_slot`, and `latency_ms`.
+- **Embeddings (`embed_texts`)**: Batches texts (max 50) using `GEMINI_EMBEDDING_MODEL` with truncated dimensions (`EMBEDDING_DIMENSIONS=768`) and L2-normalizes vectors. Handles `task_type` ("RETRIEVAL_DOCUMENT", "RETRIEVAL_QUERY") with fallback.
+- **Return Type**: Yields a structured `GeminiTextResult` or `GeminiEmbedResult` containing text/vectors, `model_used`, `key_slot`, and `latency_ms`.
 
 ---
 
-## 5. Diagnostic Endpoints (`app/api/gemini_status.py`)
+## 5. Knowledge & RAG Architecture (`app/knowledge/`)
+
+KisaanDost employs a token-efficient, zero-cost local RAG pipeline:
+
+```
+Markdown Docs (/docs/*.md)
+       │
+       ▼
+Heading & Sentence Chunker (chunker.py)
+  - Heading path preservation ("Cotton > Pests > Whitefly")
+  - Max 900 chars, 100 char overlap, sentence boundary snapping
+       │
+       ▼
+Embedding Service (gemini_client.embed_texts)
+  - gemini-embedding-001 (768d, L2-normalized)
+  - Task type: RETRIEVAL_DOCUMENT
+       │
+       ▼
+Persistent Vector Store (store.py)
+  - ChromaDB (data/chroma) with cosine distance
+  - Deterministic SHA-256 chunk IDs (idempotent upserts)
+       │
+Farmer Query ────────► Query Embedding Cache (retriever.py)
+                       - In-memory LRU cache (256 entries)
+                       - Zero API call on repeated queries
+                       │
+                       ▼
+               Vector Search & Relevance Filter
+                       - Cosine similarity conversion (1.0 - distance)
+                       - Filter: score >= RAG_MIN_RELEVANCE
+                       │
+                       ▼
+               Context Formatter (context.py)
+                       - Strict cap: RAG_CONTEXT_MAX_CHARS (3,000 chars)
+                       - Never cuts mid-sentence
+                       - Only source of context for LLM prompt
+```
+
+---
+
+## 6. Diagnostic Endpoints (`app/api/`)
 
 | Endpoint | Environment | Description |
 |---|---|---|
 | `GET /gemini-status` | All (`dev` & `prod`) | Returns counts of configured keys per domain and effective model lists. Never returns secrets or partial keys. |
 | `GET /gemini-test?domain=CHAT` | Development only | Sends `"Reply with exactly: OK"` through the chosen domain's pool. Verifies live key validity. On failure returns `attempts` detailing `exception_type` and scrubbed `message`. Returns 404 in production. |
 | `GET /gemini-models-check?domain=CHAT` | Development only | Tests each model in the list individually without fallback. Returns per-model health with `exception_type` and scrubbed `message`. Returns 404 in production. |
+| `GET /knowledge-status` | Development only | Returns ChromaDB collection stats (total chunks, per-crop counts, model, dimensions, ready flag). Returns 404 in production. |
+| `GET /knowledge-search?q=...&crop=...&top_k=...` | Development only | Tests query embedding, vector search, and context formatting. Returns 404 in production. |
 
 ---
 
-## 6. Environment Variables Reference
+## 7. Environment Variables Reference
 
 All variables are optional with safe defaults to allow local development and scaffolding without secrets:
 
@@ -132,6 +175,15 @@ All variables are optional with safe defaults to allow local development and sca
 | `GEMINI_API_KEY` | `None` | Default fallback API key if domain-specific keys are not provided. |
 | `GEMINI_MODEL` | `gemini-3.5-flash-lite` | Primary text and reasoning model override. |
 | `GEMINI_TTS_MODEL` | `gemini-3.8-flash-lite-tts` | Primary TTS model override. |
+| `GEMINI_EMBEDDING_MODEL` | `gemini-embedding-001` | Model for document and query text embeddings. |
+| `EMBEDDING_DIMENSIONS` | `768` | Vector dimensionality (smaller = faster search & lower storage). |
+| `CHROMA_PATH` | `data/chroma` | Persistent ChromaDB database folder relative to `backend/`. |
+| `RAG_TOP_K` | `3` | Default number of knowledge chunks retrieved per query. |
+| `RAG_CHUNK_MAX_CHARS` | `900` | Maximum character length per knowledge chunk. |
+| `RAG_CHUNK_OVERLAP_CHARS` | `100` | Overlap character length between sequential chunks. |
+| `RAG_MIN_RELEVANCE` | `0.0` | Minimum similarity threshold (0.0 to 1.0; 0 disables). |
+| `RAG_CONTEXT_MAX_CHARS` | `3000` | Hard cap on total characters injected into agent prompt context. |
+| `RAG_QUERY_CACHE_SIZE` | `256` | In-memory LRU cache capacity for query embeddings. |
 | `GEMINI_CHAT_KEY_1..3` | `None` | Rotating API key slots 1 to 3 for chat / reasoning. |
 | `GEMINI_STT_KEY_1..3` | `None` | Rotating API key slots 1 to 3 for speech-to-text. |
 | `GEMINI_TTS_KEY_1..3` | `None` | Rotating API key slots 1 to 3 for text-to-speech. |
@@ -143,9 +195,10 @@ All variables are optional with safe defaults to allow local development and sca
 
 ---
 
-## 7. Known Architectural Decisions & Constraints
+## 8. Known Architectural Decisions & Constraints
 
-1. **Fixed Model Names**: Model strings are pinned to `gemini-3.5-flash-lite` (text/STT) and `gemini-3.8-flash-lite-tts` (TTS). AI agents must never "correct" or prepend `models/` to these strings.
-2. **Production Endpoint Masking**: Diagnostic test endpoints `/gemini-test` and `/gemini-models-check` return HTTP 404 when `ENVIRONMENT="production"` to prevent quota abuse and surface area leakage.
-3. **Additive Development**: New stages build upon earlier stages without rewrites. All modules import through `core/config.py` and `core/key_manager.py`.
-4. **Secret Isolation**: Real `.env` files must never be checked into git, printed to logs, or accessed by AI agents.
+1. **Fixed Model Names**: Model strings are pinned to `gemini-3.5-flash-lite` (text/STT), `gemini-3.8-flash-lite-tts` (TTS), and `gemini-embedding-001` (RAG). AI agents must never "correct" or prepend `models/` to these strings.
+2. **Context Injection Gate**: Agent prompts may receive agronomic knowledge **only** via `app.knowledge.context.format_context()`. Raw document text is never injected directly into prompts.
+3. **Production Endpoint Masking**: Diagnostic test endpoints return HTTP 404 when `ENVIRONMENT="production"`.
+4. **Additive Development**: New stages build upon earlier stages without rewrites. All modules import through `core/config.py` and `core/key_manager.py`.
+5. **Secret Isolation**: Real `.env` files must never be checked into git, printed to logs, or accessed by AI agents.

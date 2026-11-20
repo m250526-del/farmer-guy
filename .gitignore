@@ -48,10 +48,12 @@ pnpm-debug.log*
 backend/static/audio/*.wav
 
 # --- Data & Vector store (RAG / ChromaDB / SQLite) ---
+data/chroma/
+backend/data/
+backend/data/chroma/
 chroma_data/
 *.chroma/
 backend/chroma_db/
-backend/data/
 *.sqlite3
 *.db
 
